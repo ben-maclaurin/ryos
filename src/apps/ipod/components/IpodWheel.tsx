@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { cn } from "@/lib/utils";
 
 type WheelArea = "top" | "right" | "bottom" | "left" | "center";
@@ -12,7 +12,7 @@ interface IpodWheelProps {
 }
 
 // How many degrees of wheel rotation should equal one scroll step
-const rotationStepDeg = 15; // increase this value to reduce sensitivity
+const rotationStepDeg = 17; // increase this value to reduce sensitivity (slower scroll), decrease for more fluidity (faster scroll)
 
 export function IpodWheel({
   theme,
@@ -28,8 +28,27 @@ export function IpodWheel({
   const lastAngleRef = useRef<number | null>(null); // Last touch angle in radians
   const rotationAccumulatorRef = useRef(0); // Accumulated rotation in radians
 
+  // ADDED: Refs for mouse click-and-drag rotation
+  const isMouseDraggingRef = useRef(false);
+  const lastMouseDragAngleRef = useRef<number | null>(null);
+  const mouseDragRotationAccumulatorRef = useRef(0);
+  const mouseDownPosRef = useRef<{ x: number; y: number } | null>(null);
+  const hasDraggedRef = useRef(false);
+
+  // ADDED: Refs for callback props to ensure handlers use the latest versions
+  const onWheelClickRef = useRef(onWheelClick);
+  const onWheelRotationRef = useRef(onWheelRotation);
+
+  useEffect(() => {
+    onWheelClickRef.current = onWheelClick;
+  }, [onWheelClick]);
+
+  useEffect(() => {
+    onWheelRotationRef.current = onWheelRotation;
+  }, [onWheelRotation]);
+
   // Calculate angle (in degrees) from the center of the wheel – used for click areas
-  const getAngleFromCenterDeg = (x: number, y: number): number => {
+  const getAngleFromCenterDeg = useCallback((x: number, y: number): number => {
     if (!wheelRef.current) return 0;
 
     const rect = wheelRef.current.getBoundingClientRect();
@@ -37,10 +56,10 @@ export function IpodWheel({
     const centerY = rect.top + rect.height / 2;
 
     return (Math.atan2(y - centerY, x - centerX) * 180) / Math.PI;
-  };
+  }, []);
 
   // Same as above but returns radians – used for rotation calculation
-  const getAngleFromCenterRad = (x: number, y: number): number => {
+  const getAngleFromCenterRad = useCallback((x: number, y: number): number => {
     if (!wheelRef.current) return 0;
 
     const rect = wheelRef.current.getBoundingClientRect();
@@ -48,10 +67,10 @@ export function IpodWheel({
     const centerY = rect.top + rect.height / 2;
 
     return Math.atan2(y - centerY, x - centerX);
-  };
+  }, []);
 
   // Determine wheel section from angle
-  const getWheelSection = (angleDeg: number): WheelArea => {
+  const getWheelSection = useCallback((angleDeg: number): WheelArea => {
     const angle = (angleDeg * Math.PI) / 180; // Convert degrees to radians
     if (angle >= -Math.PI / 4 && angle < Math.PI / 4) {
       return "right";
@@ -63,7 +82,7 @@ export function IpodWheel({
       // Default to top, but this section is primarily for the menu button
       return "top";
     }
-  };
+  }, []);
 
   // Handle touch start
   const handleTouchStart = (e: React.TouchEvent) => {
@@ -98,12 +117,12 @@ export function IpodWheel({
 
     // Trigger rotation events when threshold exceeded
     while (rotationAccumulatorRef.current > threshold) {
-      onWheelRotation("clockwise");
+      onWheelRotationRef.current("clockwise");
       rotationAccumulatorRef.current -= threshold;
     }
 
     while (rotationAccumulatorRef.current < -threshold) {
-      onWheelRotation("counterclockwise");
+      onWheelRotationRef.current("counterclockwise");
       rotationAccumulatorRef.current += threshold;
     }
   };
@@ -114,6 +133,65 @@ export function IpodWheel({
     rotationAccumulatorRef.current = 0;
   };
 
+  // ADDED: Mouse drag handlers
+  const handleGlobalMouseMove = useCallback((e: MouseEvent) => {
+    if (!isMouseDraggingRef.current || lastMouseDragAngleRef.current === null) {
+      return;
+    }
+    e.preventDefault();
+
+    const currentAngleRad = getAngleFromCenterRad(e.clientX, e.clientY);
+    let delta = currentAngleRad - lastMouseDragAngleRef.current;
+
+    if (delta > Math.PI) delta -= 2 * Math.PI;
+    if (delta < -Math.PI) delta += 2 * Math.PI;
+
+    mouseDragRotationAccumulatorRef.current += delta;
+    lastMouseDragAngleRef.current = currentAngleRad;
+    
+    const thresholdRad = (rotationStepDeg * Math.PI) / 180;
+
+    // Check if significant rotation happened to mark as drag
+    if (Math.abs(mouseDragRotationAccumulatorRef.current) >= thresholdRad / 2) { // A bit of tolerance before marking as drag
+        hasDraggedRef.current = true;
+    }
+
+    while (mouseDragRotationAccumulatorRef.current >= thresholdRad) {
+      onWheelRotationRef.current("clockwise");
+      mouseDragRotationAccumulatorRef.current -= thresholdRad;
+      hasDraggedRef.current = true; // Ensure it's marked if events fire
+    }
+    while (mouseDragRotationAccumulatorRef.current <= -thresholdRad) {
+      onWheelRotationRef.current("counterclockwise");
+      mouseDragRotationAccumulatorRef.current += thresholdRad;
+      hasDraggedRef.current = true; // Ensure it's marked if events fire
+    }
+  }, [getAngleFromCenterRad, rotationStepDeg]);
+
+  const handleGlobalMouseUp = useCallback((e: MouseEvent) => {
+    if (!isMouseDraggingRef.current) {
+      return;
+    }
+    e.preventDefault();
+
+    window.removeEventListener("mousemove", handleGlobalMouseMove);
+    window.removeEventListener("mouseup", handleGlobalMouseUp);
+
+    isMouseDraggingRef.current = false;
+    // lastMouseDragAngleRef is reset in handleWheelSurfaceMouseDown for the next drag
+
+    if (!hasDraggedRef.current && mouseDownPosRef.current) {
+      const angleDeg = getAngleFromCenterDeg(mouseDownPosRef.current.x, mouseDownPosRef.current.y);
+      const section = getWheelSection(angleDeg);
+      onWheelClickRef.current(section);
+    }
+    
+    // Reset accumulator for the next interaction (though it's also reset on mousedown)
+    mouseDragRotationAccumulatorRef.current = 0; 
+    // mouseDownPosRef.current is reset in handleWheelSurfaceMouseDown
+    // hasDraggedRef is reset in handleWheelSurfaceMouseDown
+  }, [getAngleFromCenterDeg, getWheelSection, handleGlobalMouseMove]);
+
   // Handle mouse wheel scroll for rotation
   const handleMouseWheel = (e: React.WheelEvent) => {
     // Accumulate delta and only trigger when it reaches threshold
@@ -123,28 +201,55 @@ export function IpodWheel({
     // Using a threshold of 50 to reduce sensitivity
     if (newDelta >= 50) {
       if (e.deltaY < 0) {
-        onWheelRotation("counterclockwise");
+        onWheelRotationRef.current("counterclockwise");
       } else {
-        onWheelRotation("clockwise");
+        onWheelRotationRef.current("clockwise");
       }
       // Reset delta after triggering action
       setWheelDelta(0);
     }
   };
 
-  // Handle mouse down for clicks (excluding menu button)
-  const handleMouseDown = (e: React.MouseEvent) => {
-    // Don't handle wheel clicks if we're clicking on the menu button
-    if (
-      e.target &&
-      (e.target as HTMLElement).classList.contains("menu-button")
-    ) {
+  // MODIFIED: Handle mouse down for clicks AND starting drag
+  const handleWheelSurfaceMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) { // Only main (left) click
+        return;
+    }
+    // Don't handle wheel interactions if we're clicking directly on the menu button
+    if (e.target && (e.target as HTMLElement).classList.contains("menu-button")) {
       return;
     }
-    const angleDeg = getAngleFromCenterDeg(e.clientX, e.clientY);
-    const section = getWheelSection(angleDeg);
-    onWheelClick(section);
+    
+    e.preventDefault(); // Prevent text selection, default drag etc.
+
+    isMouseDraggingRef.current = true;
+    hasDraggedRef.current = false; // Reset drag status for new interaction
+    mouseDownPosRef.current = { x: e.clientX, y: e.clientY };
+
+    const initialAngleRad = getAngleFromCenterRad(e.clientX, e.clientY);
+    lastMouseDragAngleRef.current = initialAngleRad;
+    mouseDragRotationAccumulatorRef.current = 0; // Reset accumulator
+
+    window.addEventListener("mousemove", handleGlobalMouseMove);
+    window.addEventListener("mouseup", handleGlobalMouseUp);
   };
+
+  // ADDED: useEffect for global listener cleanup on unmount
+  useEffect(() => {
+    // This cleanup function will be called when the component unmounts
+    return () => {
+      window.removeEventListener("mousemove", handleGlobalMouseMove);
+      window.removeEventListener("mouseup", handleGlobalMouseUp);
+      // Reset any lingering drag state if unmounted mid-drag
+      if (isMouseDraggingRef.current) {
+        isMouseDraggingRef.current = false;
+        lastMouseDragAngleRef.current = null;
+        mouseDragRotationAccumulatorRef.current = 0;
+        mouseDownPosRef.current = null;
+        hasDraggedRef.current = false;
+      }
+    };
+  }, [handleGlobalMouseMove, handleGlobalMouseUp]); // Dependencies ensure cleanup function is current
 
   return (
     <div
@@ -166,7 +271,7 @@ export function IpodWheel({
       <div
         ref={wheelRef}
         className="absolute w-full h-full rounded-full touch-none select-none"
-        onMouseDown={handleMouseDown}
+        onMouseDown={handleWheelSurfaceMouseDown}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
